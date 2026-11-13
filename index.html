@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Combo Checker</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #151d18; color: #d8e2d2; margin: 0; padding: 16px; max-width: 640px; margin-inline: auto; line-height: 1.4; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p { margin: 4px 0 12px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; margin: 12px 0; }
+  .pad button { font-size: 1.5rem; border: 2px solid #7aa468; background: #25352b; color: #d8e2d2; border-radius: 8px; cursor: pointer; }
+  .pad button:active, .pad button.lit { background: #7aa468; color: #151d18; }
+  .up { grid-column: 2; grid-row: 1; } .left { grid-column: 1; grid-row: 2; }
+  .right { grid-column: 3; grid-row: 2; } .down { grid-column: 2; grid-row: 3; }
+  label { display: block; margin: 8px 0; }
+  input[type=range] { width: 70%; }
+  .row button { padding: 8px 12px; margin: 0 6px 6px 0; border-radius: 6px; border: 1px solid #7aa468; background: #25352b; color: #d8e2d2; cursor: pointer; font-size: 1rem; }
+  h2 { font-size: 1.1rem; margin: 16px 0 4px; }
+  #moves { font-size: 1.2rem; min-height: 1.6em; }
+  #log { font-family: ui-monospace, monospace; font-size: 0.85rem; background: #0e1410; padding: 8px; border-radius: 6px; max-height: 280px; overflow: auto; margin: 0; white-space: pre-wrap; }
+  .lost { color: #e0a463; }
+  .ok { color: #8fcf7c; }
+  #banner, #chorusBanner { padding: 8px 12px; border-radius: 6px; font-weight: bold; margin: 8px 0; border: 2px solid; }
+  #banner.pass, #chorusBanner.pass { color: #8fcf7c; border-color: #8fcf7c; }
+  #banner.fail, #chorusBanner.fail { color: #ff9a8a; border-color: #ff9a8a; }
+  #tests, #chorusTests { font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  :focus-visible { outline: 3px solid #e6c85a; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<h1>Combo Checker</h1>
+<p>Press arrow keys, tap the pad, or push a controller d-pad. Up then left within the window counts as one diagonal move.</p>
+<div id="banner" role="status">Self-test: running...</div>
+<div id="chorusBanner" role="status">Second-chorus late-hit test: running...</div>
+
+<div class="pad" role="group" aria-label="On-screen d-pad">
+  <button class="up" data-dir="up" aria-label="up">&#9650;</button>
+  <button class="left" data-dir="left" aria-label="left">&#9664;</button>
+  <button class="right" data-dir="right" aria-label="right">&#9654;</button>
+  <button class="down" data-dir="down" aria-label="down">&#9660;</button>
+</div>
+
+<label>Combo window: <b id="winVal">120</b> ms
+  <input type="range" id="win" min="20" max="400" step="10" value="120">
+</label>
+<p id="pad">Controller: none seen yet (press a d-pad button).</p>
+
+<h2>Moves</h2>
+<div id="moves" aria-live="polite">nothing yet</div>
+
+<h2>Press log</h2>
+<pre id="log" tabindex="0" aria-label="Press log">(no presses yet)</pre>
+<div class="row" style="margin-top:8px">
+  <button id="clear">Clear</button>
+  <button id="test">Run self-test</button>
+</div>
+<div id="tests" tabindex="-1" aria-live="polite"></div>
+<h2>Second chorus late hits</h2>
+<div id="chorusTests"></div>
+
+<script>
+var AXIS = { up: "v", down: "v", left: "h", right: "h" };
+
+// strict is only for the deliberately broken test copy (< instead of <=)
+function addPress(moves, dir, t, windowMs, strict) {
+  var cur = moves[moves.length - 1];
+  if (cur) {
+    var gap = t - cur.last;
+    if (cur.dirs.length === 1 && AXIS[cur.dirs[0]] !== AXIS[dir]) {
+      var inTime = strict ? gap < windowMs : gap <= windowMs;
+      if (inTime) {
+        cur.dirs.push(dir);
+        cur.last = t;
+        return { joined: true, gap: gap, why: "joined move #" + moves.length };
+      }
+      moves.push({ dirs: [dir], last: t });
+      return { joined: false, gap: gap, why: "TOO SLOW by " + (gap - windowMs).toFixed(1) + " ms, new move", lost: true };
+    }
+    moves.push({ dirs: [dir], last: t });
+    return { joined: false, gap: gap, why: "new move (same axis or move already full)" };
+  }
+  moves.push({ dirs: [dir], last: t });
+  return { joined: false, gap: null, why: "first move" };
+}
+
+function moveName(m) { return m.dirs.join("+"); }
+
+function now() {
+  if (typeof performance !== "undefined" && performance && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function getPads() {
+  try {
+    if (typeof navigator !== "undefined" && navigator && typeof navigator.getGamepads === "function") {
+      var list = navigator.getGamepads();
+      return list ? Array.prototype.slice.call(list) : [];
+    }
+  } catch (err) {}
+  return [];
+}
+
+function nextFrame(fn) {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(fn);
+  else setTimeout(fn, 16);
+}
+
+var moves = [];
+var count = 0;
+var windowMs = 120;
+var logEl = document.getElementById("log");
+var movesEl = document.getElementById("moves");
+
+function press(dir, source, t) {
+  var res = addPress(moves, dir, t, windowMs);
+  count++;
+  var line = String(count).padStart(3, " ") + "  t=" + t.toFixed(1).padStart(10, " ") + "ms  " +
+    dir.padEnd(5, " ") + " " + source.padEnd(5, " ") + " gap=" +
+    (res.gap === null ? "-" : res.gap.toFixed(1) + "ms") + "  " + res.why;
+  if (count === 1) logEl.textContent = "";
+  var span = document.createElement("span");
+  span.className = res.joined ? "ok" : (res.lost ? "lost" : "");
+  span.textContent = line + "\n";
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+  movesEl.textContent = moves.map(moveName).join("  |  ");
+  console.log(line);
+}
+
+var KEYS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+document.addEventListener("keydown", function (e) {
+  var d = KEYS[e.key];
+  if (!d || e.repeat) return;
+  e.preventDefault();
+  press(d, "key", now());
+});
+
+document.querySelectorAll(".pad button").forEach(function (b) {
+  b.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    press(b.dataset.dir, "tap", now());
+  });
+  b.addEventListener("keydown", function (e) { e.stopPropagation(); });
+});
+
+var PADBTN = { 12: "up", 13: "down", 14: "left", 15: "right" };
+var wasDown = {};
+var padNote = document.getElementById("pad");
+
+function poll() {
+  var pads = getPads();
+  for (var i = 0; i < pads.length; i++) {
+    var gp = pads[i];
+    if (!gp || !gp.buttons) continue;
+    for (var b in PADBTN) {
+      var key = i + ":" + b;
+      var down = !!(gp.buttons[b] && gp.buttons[b].pressed);
+      if (down && !wasDown[key]) {
+        padNote.textContent = "Controller: " + gp.id + " (read once per frame, so ~16 ms steps)";
+        press(PADBTN[b], "pad", now());
+      }
+      wasDown[key] = down;
+    }
+  }
+  nextFrame(poll);
+}
+
+if (getPads().length === 0 &&
+    !(typeof navigator !== "undefined" && navigator && typeof navigator.getGamepads === "function")) {
+  padNote.textContent = "Controller: this page can't see the gamepad API here. Keys and the on-screen pad still work.";
+}
+nextFrame(poll);
+
+document.getElementById("win").addEventListener("input", function (e) {
+  windowMs = Number(e.target.value);
+  document.getElementById("winVal").textContent = windowMs;
+});
+
+document.getElementById("clear").addEventListener("click", function () {
+  moves = []; count = 0;
+  logEl.textContent = "(no presses yet)";
+  movesEl.textContent = "nothing yet";
+});
+
+// ---- self-test ----
+function runCase(presses, win) {
+  var m = [];
+  presses.forEach(function (p) { addPress(m, p[0], p[1], win); });
+  return m.map(moveName).join(",");
+}
+
+function runTests() {
+  var cases = [
+    ["up then left, 80ms apart, window 120", [["up", 0], ["left", 80]], 120, "up+left"],
+    ["late hit (200ms) does not join", [["up", 0], ["left", 200]], 120, "up,left"],
+    ["1ms late does not join", [["up", 0], ["left", 121]], 120, "up,left"],
+    ["exactly on the window edge joins", [["up", 0], ["left", 120]], 120, "up+left"],
+    ["same direction twice, no join", [["up", 0], ["up", 10]], 120, "up,up"],
+    ["opposites, no join", [["up", 0], ["down", 10]], 120, "up,down"],
+    ["three quick: up, left, right", [["up", 0], ["left", 30], ["right", 60]], 120, "up+left,right"],
+    ["down, right, then up 50ms later", [["down", 0], ["right", 40], ["up", 90]], 120, "down+right,up"],
+    ["miss resets: late left, then up in time joins with that left", [["up", 0], ["left", 300], ["up", 350]], 120, "up,left+up"],
+    ["miss resets: after a late hit the old up can't join again", [["up", 0], ["left", 300], ["right", 340]], 120, "up,left,right"],
+    ["window 20: 20ms joins", [["up", 0], ["left", 20]], 20, "up+left"],
+    ["window 20: 21ms is late", [["up", 0], ["left", 21]], 20, "up,left"],
+    ["window 400: 400ms joins", [["down", 0], ["right", 400]], 400, "down+right"],
+    ["window 400: 401ms is late", [["down", 0], ["right", 401]], 400, "down,right"],
+    ["fractional: 120.4ms is late at 120", [["up", 0], ["right", 120.4]], 120, "up,right"],
+    ["fractional: 119.9ms joins at 120", [["up", 0], ["right", 119.9]], 120, "up+right"],
+    ["late hit measured from last press, not the first", [["up", 1000], ["left", 1100], ["down", 1300]], 120, "up+left,down"],
+    ["late hit mid-chain: gap counts from the newest press", [["left", 0], ["up", 100], ["right", 215], ["down", 300]], 120, "left+up,right+down"],
+    ["same time, different axis joins (gap 0)", [["left", 50], ["down", 50]], 120, "left+down"],
+    ["late then on-time: second pair still joins", [["up", 0], ["left", 500], ["down", 560]], 120, "up,left+down"]
+  ];
+  var out = [], bad = 0;
+  cases.forEach(function (c) {
+    var got = runCase(c[1], c[2]);
+    var pass = got === c[3];
+    if (!pass) bad++;
+    out.push((pass ? "PASS " : "FAIL ") + c[0] + " -> " + got + (pass ? "" : " (wanted " + c[3] + ")"));
+  });
+  return { lines: out, bad: bad, total: cases.length };
+}
+
+// ---- second chorus late-hit test ----
+var CHORUS2_START = 8000;
+
+// A short song: chorus 1 is one pair (up, left); chorus 2 is two pairs
+// (up, left) and (down, right). Gaps are the time between the two keys of each pair.
+function buildSong(c1gap, g1, g2) {
+  return [
+    ["up", 0], ["left", c1gap],
+    ["up", CHORUS2_START], ["left", CHORUS2_START + g1],
+    ["down", CHORUS2_START + 500], ["right", CHORUS2_START + 500 + g2]
+  ];
+}
+
+// Pure rule: how many late hits happen at or after startT.
+function lateAfter(presses, win, startT, strict) {
+  var m = [], n = 0;
+  presses.forEach(function (p) {
+    var r = addPress(m, p[0], p[1], win, strict);
+    if (r.lost && p[1] >= startT) n++;
+  });
+  return n;
+}
+
+function runChorusTests() {
+  // [name, window, chorus1 gap, chorus2 gap A, chorus2 gap B, wanted late hits after chorus 2 starts]
+  var cases = [
+    ["window 120: both pairs exactly on the edge", 120, 50, 120, 120, 0],
+    ["window 120: first pair 1ms late", 120, 50, 121, 120, 1],
+    ["window 120: second pair 1ms late", 120, 50, 120, 121, 1],
+    ["window 120: both pairs 1ms late", 120, 50, 121, 121, 2],
+    ["window 120: late hit in chorus 1 is not counted", 120, 300, 100, 100, 0],
+    ["window 120: late in both choruses, only chorus 2 counted", 120, 300, 200, 200, 2],
+    ["window 20: on the edge", 20, 50, 20, 20, 0],
+    ["window 20: 1ms late, one pair", 20, 50, 21, 20, 1],
+    ["window 400: on the edge", 400, 50, 400, 400, 0],
+    ["window 400: both 1ms late", 400, 50, 401, 401, 2]
+  ];
+  var out = [], bad = 0, brokenFails = 0;
+  cases.forEach(function (c) {
+    var song = buildSong(c[2], c[3], c[4]);
+    var got = lateAfter(song, c[1], CHORUS2_START, false);
+    var broken = lateAfter(song, c[1], CHORUS2_START, true);
+    var pass = got === c[5];
+    if (!pass) bad++;
+    if (broken !== c[5]) brokenFails++;
+    out.push((pass ? "PASS " : "FAIL ") + c[0] + " -> " + got + " late" + (pass ? "" : " (wanted " + c[5] + ")") +
+      "   [off-by-one copy: " + broken + (broken !== c[5] ? ", caught" : "") + "]");
+  });
+  return { lines: out, bad: bad, total: cases.length, brokenFails: brokenFails };
+}
+
+function showChorusTests() {
+  var r;
+  try { r = runChorusTests(); }
+  catch (err) { r = { lines: ["ERROR " + err.message], bad: 1, total: 0, brokenFails: 0 }; }
+  var banner = document.getElementById("chorusBanner");
+  var box = document.getElementById("chorusTests");
+  var checkerBroken = !r.bad && r.brokenFails === 0;
+  banner.className = (r.bad || checkerBroken) ? "fail" : "pass";
+  if (r.bad) banner.textContent = "Second-chorus late-hit test: FAIL (" + r.bad + " of " + r.total + " wrong)";
+  else if (checkerBroken) banner.textContent = "Second-chorus late-hit test: CHECKER BROKEN (the off-by-one copy passed everything)";
+  else banner.textContent = "Second-chorus late-hit test: PASS (all " + r.total + ", off-by-one copy failed " + r.brokenFails + ")";
+  box.textContent = r.lines.join("\n");
+}
+
+function showTests(focus) {
+  var r;
+  try { r = runTests(); }
+  catch (err) { r = { lines: ["ERROR " + err.message], bad: 1, total: 0 }; }
+  var banner = document.getElementById("banner");
+  banner.className = r.bad ? "fail" : "pass";
+  banner.textContent = r.bad ? "Self-test: FAIL (" + r.bad + " of " + r.total + " wrong)" : "Self-test: PASS (all " + r.total + ")";
+  var box = document.getElementById("tests");
+  box.textContent = r.lines.join("\n");
+  showChorusTests();
+  if (focus) box.focus();
+}
+document.getElementById("test").addEventListener("click", function () { showTests(true); });
+showTests(false);
+</script>
+</body>
+</html>
