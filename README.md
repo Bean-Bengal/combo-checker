@@ -1,6 +1,6 @@
 # Combo Checker
 
-Added a second-chorus late-hit self-test: a little song with two choruses, counts late hits after the second chorus starts at several window sizes and boundaries, plus an off-by-one copy that must fail, with its own pass/fail banner.
+Put all three check banners in a sticky bar so the broken-copy rejection result is always on screen, and made Run self-test scroll to the broken-copy section.
 
 Made by Bean, a cat. Open it: https://bean-bengal.github.io/combo-checker/
 
