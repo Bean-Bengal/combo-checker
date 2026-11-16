@@ -21,18 +21,23 @@
   #log { font-family: ui-monospace, monospace; font-size: 0.85rem; background: #0e1410; padding: 8px; border-radius: 6px; max-height: 280px; overflow: auto; margin: 0; white-space: pre-wrap; }
   .lost { color: #e0a463; }
   .ok { color: #8fcf7c; }
-  #banner, #chorusBanner { padding: 8px 12px; border-radius: 6px; font-weight: bold; margin: 8px 0; border: 2px solid; }
-  #banner.pass, #chorusBanner.pass { color: #8fcf7c; border-color: #8fcf7c; }
-  #banner.fail, #chorusBanner.fail { color: #ff9a8a; border-color: #ff9a8a; }
-  #tests, #chorusTests { font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #bar { position: sticky; top: 0; z-index: 5; background: #151d18; padding: 4px 0; }
+  #banner, #chorusBanner, #rejectBanner { padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.85rem; margin: 4px 0; border: 2px solid; }
+  #banner.pass, #chorusBanner.pass, #rejectBanner.pass { color: #8fcf7c; border-color: #8fcf7c; }
+  #banner.fail, #chorusBanner.fail, #rejectBanner.fail { color: #ff9a8a; border-color: #ff9a8a; }
+  #tests, #chorusTests, #rejectTests { font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
   :focus-visible { outline: 3px solid #e6c85a; outline-offset: 2px; }
 </style>
 </head>
 <body>
+<script data-bean-store>(function(){if(typeof location!=='undefined'&&location&&location.protocol==='about:'&&typeof document!=='undefined'&&document.addEventListener){document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href^="#"]');if(!a||a.target==='_blank')return;e.preventDefault();try{location.hash=a.getAttribute('href')}catch(x){}},true)}if(typeof window==='undefined')return;try{window.localStorage.getItem('x');return}catch(e){}var d=Object.assign({},window.__BEAN_SAVED||{});function post(){try{parent.postMessage({type:'bean-store',data:d},'*')}catch(e){}}var ls={getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v);post()},removeItem:function(k){delete d[k];post()},clear:function(){d={};post()},key:function(i){return Object.keys(d)[i]||null}};Object.defineProperty(ls,'length',{get:function(){return Object.keys(d).length}});try{Object.defineProperty(window,'localStorage',{value:ls,configurable:true})}catch(e){}})();</script>
 <h1>Combo Checker</h1>
 <p>Press arrow keys, tap the pad, or push a controller d-pad. Up then left within the window counts as one diagonal move.</p>
+<div id="bar">
 <div id="banner" role="status">Self-test: running...</div>
 <div id="chorusBanner" role="status">Second-chorus late-hit test: running...</div>
+<div id="rejectBanner" role="status">Broken-copy rejection test: running...</div>
+</div>
 
 <div class="pad" role="group" aria-label="On-screen d-pad">
   <button class="up" data-dir="up" aria-label="up">&#9650;</button>
@@ -58,6 +63,8 @@
 <div id="tests" tabindex="-1" aria-live="polite"></div>
 <h2>Second chorus late hits</h2>
 <div id="chorusTests"></div>
+<h2 id="rejectHead" tabindex="-1">Broken copy must fail</h2>
+<div id="rejectTests"></div>
 
 <script>
 var AXIS = { up: "v", down: "v", left: "h", right: "h" };
@@ -228,8 +235,6 @@ function runTests() {
 // ---- second chorus late-hit test ----
 var CHORUS2_START = 8000;
 
-// A short song: chorus 1 is one pair (up, left); chorus 2 is two pairs
-// (up, left) and (down, right). Gaps are the time between the two keys of each pair.
 function buildSong(c1gap, g1, g2) {
   return [
     ["up", 0], ["left", c1gap],
@@ -248,8 +253,27 @@ function lateAfter(presses, win, startT, strict) {
   return n;
 }
 
+// Deliberately broken twin: off-by-one on the chorus start (> instead of >=).
+function lateAfterBrokenStart(presses, win, startT) {
+  var m = [], n = 0;
+  presses.forEach(function (p) {
+    var r = addPress(m, p[0], p[1], win, false);
+    if (r.lost && p[1] > startT) n++;
+  });
+  return n;
+}
+
+// Deliberately broken twin: counts every non-joined press as late.
+function lateAfterEverything(presses, win, startT) {
+  var m = [], n = 0;
+  presses.forEach(function (p) {
+    var r = addPress(m, p[0], p[1], win, false);
+    if (!r.joined && p[1] >= startT) n++;
+  });
+  return n;
+}
+
 function runChorusTests() {
-  // [name, window, chorus1 gap, chorus2 gap A, chorus2 gap B, wanted late hits after chorus 2 starts]
   var cases = [
     ["window 120: both pairs exactly on the edge", 120, 50, 120, 120, 0],
     ["window 120: first pair 1ms late", 120, 50, 121, 120, 1],
@@ -276,6 +300,60 @@ function runChorusTests() {
   return { lines: out, bad: bad, total: cases.length, brokenFails: brokenFails };
 }
 
+// ---- rejection test: broken copies MUST fail these ----
+function runRejectTests() {
+  var cases = [
+    ["late hit exactly at chorus start counts (8000)",
+      [["up", 7900], ["left", 8000]], 50, 8000, 1, ["start"]],
+    ["late hit 1ms before chorus start does not count (7999)",
+      [["up", 7800], ["left", 7999]], 50, 8000, 0, []],
+    ["late hit 1ms after chorus start counts (8001)",
+      [["up", 7800], ["left", 8001]], 50, 8000, 1, []],
+    ["gap exactly 120 at window 120 is not late",
+      [["up", 8000], ["left", 8120]], 120, 8000, 0, ["strict"]],
+    ["gap 121 at window 120 is late",
+      [["up", 8000], ["left", 8121]], 120, 8000, 1, []],
+    ["gap 119 at window 120 is not late",
+      [["up", 8000], ["left", 8119]], 120, 8000, 0, []],
+    ["same-axis second press is not a late hit",
+      [["up", 8000], ["up", 8500]], 120, 8000, 0, ["everything"]]
+  ];
+  var twins = {
+    strict: function (p, w, s) { return lateAfter(p, w, s, true); },
+    start: lateAfterBrokenStart,
+    everything: lateAfterEverything
+  };
+  var out = [], bad = 0, caught = 0, expected = 0, missed = 0;
+  cases.forEach(function (c) {
+    var got = lateAfter(c[1], c[2], c[3], false);
+    var pass = got === c[4];
+    if (!pass) bad++;
+    var notes = [];
+    c[5].forEach(function (name) {
+      expected++;
+      var t = twins[name](c[1], c[2], c[3]);
+      if (t !== c[4]) { caught++; notes.push(name + " twin gave " + t + ", rejected"); }
+      else { missed++; notes.push(name + " twin gave " + t + ", NOT REJECTED"); }
+    });
+    out.push((pass ? "PASS " : "FAIL ") + c[0] + " -> " + got + (pass ? "" : " (wanted " + c[4] + ")") +
+      (notes.length ? "   [" + notes.join("; ") + "]" : ""));
+  });
+  return { lines: out, bad: bad, total: cases.length, caught: caught, expected: expected, missed: missed };
+}
+
+function showRejectTests() {
+  var r;
+  try { r = runRejectTests(); }
+  catch (err) { r = { lines: ["ERROR " + err.message], bad: 1, total: 0, caught: 0, expected: 0, missed: 1 }; }
+  var banner = document.getElementById("rejectBanner");
+  var ok = !r.bad && !r.missed && r.caught > 0;
+  banner.className = ok ? "pass" : "fail";
+  if (r.bad) banner.textContent = "Broken-copy rejection test: FAIL (" + r.bad + " of " + r.total + " wrong)";
+  else if (r.missed || r.caught === 0) banner.textContent = "Broken-copy rejection test: CHECKER BROKEN (" + r.missed + " broken copies got through)";
+  else banner.textContent = "Broken-copy rejection test: PASS (all " + r.total + ", " + r.caught + " of " + r.expected + " broken copies rejected)";
+  document.getElementById("rejectTests").textContent = r.lines.join("\n");
+}
+
 function showChorusTests() {
   var r;
   try { r = runChorusTests(); }
@@ -288,6 +366,7 @@ function showChorusTests() {
   else if (checkerBroken) banner.textContent = "Second-chorus late-hit test: CHECKER BROKEN (the off-by-one copy passed everything)";
   else banner.textContent = "Second-chorus late-hit test: PASS (all " + r.total + ", off-by-one copy failed " + r.brokenFails + ")";
   box.textContent = r.lines.join("\n");
+  showRejectTests();
 }
 
 function showTests(focus) {
@@ -300,7 +379,11 @@ function showTests(focus) {
   var box = document.getElementById("tests");
   box.textContent = r.lines.join("\n");
   showChorusTests();
-  if (focus) box.focus();
+  if (focus) {
+    var h = document.getElementById("rejectHead");
+    h.focus();
+    if (h.scrollIntoView) h.scrollIntoView();
+  }
 }
 document.getElementById("test").addEventListener("click", function () { showTests(true); });
 showTests(false);
